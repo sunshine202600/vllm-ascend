@@ -22,6 +22,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_pcp,
+    get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -214,7 +215,7 @@ class AscendDSAReqMetadata:
     full_compress_sin: torch.Tensor = None
     full_compress_cos: torch.Tensor = None
     start_pos: torch.Tensor | None = None
-    num_reqs_actual: int | None = None
+    num_actual_reqs: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
     attn_mask: torch.Tensor | None = None
@@ -329,7 +330,6 @@ def build_dspark_swa_indices(
 
 
 class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
-    hadamard = None
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -391,7 +391,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
-        self._init_hadamard()
+        self.hadamard = None
+        self._init_hadamard(layer_names)
         self.start_pos_prefill: torch.Tensor = torch.zeros(
             scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
         )
@@ -409,10 +410,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
 
-    def _init_hadamard(self) -> None:
-        if AscendDSAMetadataBuilder.hadamard is not None:
-            return
-
+    def _init_hadamard(self, layer_names: list[str]) -> None:
         hf_config = self.model_config.hf_config
         if hf_config.model_type != "deepseek_v4":
             return
@@ -424,20 +422,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             raise ImportError("Please install scipy") from e
         log_dim = math.ceil(math.log2(indexer_head_dim))
         dim_padded = 2**log_dim
-        if self.vllm_config.model_config.enable_sleep_mode:
-            # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
-            # sleep/wake does not treat it as KV cache.
-            from vllm_ascend.device_allocator.camem import CaMemAllocator
-
-            allocator = CaMemAllocator.get_instance()
-            with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
-                AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                    hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                ).to(torch.bfloat16)
-        else:
-            AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-            ).to(torch.bfloat16)
+        self.hadamard = get_or_register_attention_buffer(
+            self.vllm_config,
+            layer_names,
+            "_dsa_hadamard",
+            lambda: torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device).to(
+                torch.bfloat16
+            ),
+        )
 
     @classmethod
     def get_cudagraph_support(
@@ -507,6 +499,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_tokens = self.num_actual_tokens
         return min(num_tokens, num_tokens // self.compressor_ratio + num_reqs)
 
+    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata) -> AscendDSAMetadata:
+        """Delegate to build() because DSA needs shared request metadata."""
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            num_actual_reqs=common_attn_metadata.num_reqs,
+            common_ratio_to_sas_metadata={},
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -515,7 +516,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        num_reqs_actual = kwargs.get("num_reqs_actual")
+        num_actual_reqs = kwargs.get("num_actual_reqs")
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         assert self.common_ratio_to_sas_metadata is not None
         self.set_num_actual_tokens(common_attn_metadata)
@@ -577,7 +578,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         req_metadata = self.build_req_metadata(
             common_attn_metadata=common_attn_metadata,
             seq_lens_cpu=seq_lens_cpu,
-            num_reqs_actual=num_reqs_actual,
+            num_actual_reqs=num_actual_reqs,
             cos=cos,
             sin=sin,
         )
@@ -590,7 +591,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_prefills=self.num_prefills,
             attn_state=common_attn_metadata.attn_state,
             req_metadata=req_metadata,
-            hadamard=AscendDSAMetadataBuilder.hadamard,
+            hadamard=self.hadamard,
         )
 
     def _build_sas_metadata(
@@ -680,7 +681,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         seq_lens_cpu: torch.Tensor,
-        num_reqs_actual: int | None,
+        num_actual_reqs: int | None,
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> AscendDSAReqMetadata:
@@ -697,13 +698,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         self.start_pos_prefill.fill_(0)
         self.start_pos_prefill[:num_reqs] = seq_lens - seq_lens_q
-        if num_reqs_actual is None:
-            num_reqs_actual = num_reqs
+        if num_actual_reqs is None:
+            num_actual_reqs = num_reqs
         else:
-            num_reqs_actual = min(num_reqs_actual, num_reqs)
-            if num_reqs_actual < num_reqs:
-                self.start_pos_prefill[num_reqs_actual:num_reqs].fill_(0)
-                self.block_table[num_reqs_actual:num_reqs, ...].fill_(0)
+            num_actual_reqs = min(num_actual_reqs, num_reqs)
+            if num_actual_reqs < num_reqs:
+                self.start_pos_prefill[num_actual_reqs:num_reqs].fill_(0)
+                self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
 
         layer_name = f"c{self.compressor_ratio}"
         cu_seqlens_ori_kv = None
@@ -780,7 +781,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             full_compress_sin=full_compress_sin,
             full_compress_cos=full_compress_cos,
             start_pos=self.start_pos_prefill[:num_reqs],
-            num_reqs_actual=num_reqs_actual,
+            num_actual_reqs=num_actual_reqs,
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
             attn_mask=None,
@@ -938,7 +939,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             sin=sin,
             cos=cos,
             start_pos=self.seq_lens[:num_reqs] - seq_lens_q,
-            num_reqs_actual=num_reqs,
+            num_actual_reqs=num_reqs,
             sas_metadata=sas_metadata,
             qli_metadata=None,
             attn_mask=None,

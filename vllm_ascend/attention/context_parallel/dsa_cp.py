@@ -20,6 +20,7 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -109,7 +110,7 @@ class AscendDSAReqMetadata:
     full_compress_sin: torch.Tensor = None
     full_compress_cos: torch.Tensor = None
     start_pos: torch.Tensor = None
-    num_reqs_actual: int | None = None
+    num_actual_reqs: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
     cu_cmp_seqlen_list: torch.Tensor = None
@@ -169,7 +170,6 @@ class AscendDSACPLayerMetadata:
 
 
 class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
-    hadamard = None
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -205,31 +205,25 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
         hf_config = self.model_config.hf_config
 
-        if AscendDSACPMetadataBuilder.hadamard is None:
-            if hf_config.model_type == "deepseek_v4":
-                indexer_head_dim = hf_config.index_head_dim
-                try:
-                    from scipy.linalg import hadamard  # type: ignore[import-untyped]
-                except ImportError as e:
-                    raise ImportError(
-                        "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
-                    ) from e
-                log_dim = math.ceil(math.log2(indexer_head_dim))
-                dim_padded = 2**log_dim
-                if self.vllm_config.model_config.enable_sleep_mode:
-                    # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
-                    # sleep/wake does not treat it as KV cache.
-                    from vllm_ascend.device_allocator.camem import CaMemAllocator
-
-                    allocator = CaMemAllocator.get_instance()
-                    with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
-                        AscendDSACPMetadataBuilder.hadamard = torch.tensor(
-                            hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                        ).to(torch.bfloat16)
-                else:
-                    AscendDSACPMetadataBuilder.hadamard = torch.tensor(
-                        hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                    ).to(torch.bfloat16)
+        self.hadamard = None
+        if hf_config.model_type == "deepseek_v4":
+            indexer_head_dim = hf_config.index_head_dim
+            try:
+                from scipy.linalg import hadamard  # type: ignore[import-untyped]
+            except ImportError as e:
+                raise ImportError(
+                    "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
+                ) from e
+            log_dim = math.ceil(math.log2(indexer_head_dim))
+            dim_padded = 2**log_dim
+            self.hadamard = get_or_register_attention_buffer(
+                self.vllm_config,
+                layer_names,
+                "_dsa_cp_hadamard",
+                lambda: torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device).to(
+                    torch.bfloat16
+                ),
+            )
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.req_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.req_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
@@ -294,7 +288,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
-        num_reqs_actual = kwargs.get("num_reqs_actual")
+        num_actual_reqs = kwargs.get("num_actual_reqs")
         common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         assert common_ratio_to_sas_metadata is not None
         self.common_ratio_to_sas_metadata = common_ratio_to_sas_metadata
@@ -359,7 +353,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             common_attn_metadata,
             input_positions,
             num_input_tokens,
-            num_reqs_actual,
+            num_actual_reqs,
             attn_state,
             cos=cos,
             sin=sin,
@@ -380,7 +374,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=self.seq_lens,
             cos=cos,
             sin=sin,
-            hadamard=AscendDSACPMetadataBuilder.hadamard,
+            hadamard=self.hadamard,
         )
 
     def build_for_drafting(
@@ -675,7 +669,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         input_positions: torch.Tensor | None,
         num_input_tokens: int,
-        num_reqs_actual: int | None,
+        num_actual_reqs: int | None,
         attn_state: AscendAttentionState,
         cos: RopeDataProxy,
         sin: RopeDataProxy,
@@ -738,13 +732,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
         max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
 
-        if num_reqs_actual is None:
-            num_reqs_actual = num_reqs
+        if num_actual_reqs is None:
+            num_actual_reqs = num_reqs
         else:
-            num_reqs_actual = min(num_reqs_actual, num_reqs)
-            if num_reqs_actual < num_reqs:
-                self.start_pos_prefill[num_reqs_actual:].fill_(0)
-                self.block_table[num_reqs_actual:num_reqs, ...].fill_(0)
+            num_actual_reqs = min(num_actual_reqs, num_reqs)
+            if num_actual_reqs < num_reqs:
+                self.start_pos_prefill[num_actual_reqs:].fill_(0)
+                self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
 
         # --- Compressed positions ---
         full_compress_cos, full_compress_sin = None, None
@@ -811,7 +805,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             full_compress_cos=full_compress_cos,
             start_pos=self.start_pos_prefill[:num_reqs],
             num_compressed_tokens=num_compressed_tokens,
-            num_reqs_actual=num_reqs_actual,
+            num_actual_reqs=num_actual_reqs,
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
             cu_cmp_seqlen_list=cu_cmp_seqlens,
@@ -1189,7 +1183,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert metadata.full_compress_sin is not None
         assert metadata.num_compressed_tokens is not None
         assert metadata.start_pos is not None
-        assert metadata.num_reqs_actual is not None
+        assert metadata.num_actual_reqs is not None
         full_compress_cos = metadata.full_compress_cos.view(
             metadata.full_compress_cos.shape[0],
             metadata.full_compress_cos.shape[-1],
@@ -1208,7 +1202,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             DeviceOperator.get_dsa_compressor_slot_mapping_format(),
             self.compress_ratio,
             metadata.num_compressed_tokens,
-            metadata.num_reqs_actual,
+            metadata.num_actual_reqs,
         )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -2085,7 +2079,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         global_build_kwargs = {
             **kwargs,
             "common_ratio_to_sas_metadata": {},
-            "num_reqs_actual": global_common_attn_metadata.num_reqs,
+            "num_actual_reqs": global_common_attn_metadata.num_reqs,
         }
         return self._global_metadata_builder.build(
             common_prefix_len,
