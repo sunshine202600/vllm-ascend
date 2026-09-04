@@ -10,7 +10,7 @@ The `Qwen2.5-Math-RM-72B` model is supported since `vllm-ascend:v0.9.0`.
 
 ## Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 

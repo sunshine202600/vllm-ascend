@@ -10,7 +10,7 @@ It is **strongly recommended to use the latest release candidate (rc) version or
 
 ## 2 Supported Features
 
-Please refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Please refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
 

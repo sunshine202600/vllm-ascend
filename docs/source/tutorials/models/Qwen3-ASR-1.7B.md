@@ -10,7 +10,7 @@ Qwen3-ASR-1.7B was introduced with upstream vLLM v0.19.0. Use a vLLM-Ascend imag
 
 ## 2 Supported Features
 
-Please refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Please refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
 

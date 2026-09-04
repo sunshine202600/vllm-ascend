@@ -10,7 +10,7 @@ This document is written based on the latest vLLM-Ascend version. This model is 
 
 ## 2 Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
 

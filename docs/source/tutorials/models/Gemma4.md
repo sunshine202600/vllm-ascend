@@ -10,7 +10,7 @@ This document is written based on the latest vLLM Ascend main branch. Gemma4 is 
 
 ## 2 Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model support matrix, including BF16, chunked prefill, automatic prefix caching, tensor parallelism, expert parallelism, and ACLGraph support.
+Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md) to get the model support matrix, including BF16, chunked prefill, automatic prefix caching, tensor parallelism, expert parallelism, and ACLGraph support.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 

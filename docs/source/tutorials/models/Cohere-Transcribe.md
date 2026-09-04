@@ -19,7 +19,7 @@ The current release is adapted for Atlas A2 inference products. Support for the 
 
 ## 2 Supported Features
 
-Please refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Please refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
 

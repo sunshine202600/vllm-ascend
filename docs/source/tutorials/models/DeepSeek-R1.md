@@ -11,7 +11,7 @@ This document is validated and written based on **vLLM-Ascend v0.13.0**. The cur
 
 ## 2 Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 

@@ -10,7 +10,7 @@ The Qwen3-235B-A22B model is first supported in **v0.8.4rc2**. This document is 
 
 ## 2 Supported Features
 
-Please refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Please refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
 
